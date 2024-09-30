@@ -1,0 +1,10 @@
+[package]
+name = "auth-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4.9.0"
+anyhow = "1.0.89"
+openidconnect = "3.5.0"
+serde = "1.0.210"
