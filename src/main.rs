@@ -1,34 +1,16 @@
-use std::{
-    io::Empty,
-    ops::Add,
-    str::FromStr,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use actix_web::{
-    body::BoxBody,
-    get, post,
-    web::{self, Data, Redirect},
-    App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder,
-};
+use actix_web::web::{self, Data};
+use actix_web::{get, post, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use auth_test::openid::{
-    connect, create_client, Client, RealmAccessClaims, RealmAccessIdTokenClaims,
-    RealmCodeTokenRequest, RealmIntrospectionRequest, RealmTokenIntrospectionResponse,
-    RealmTokenResponse,
-};
-use openidconnect::{
-    core::{
-        CoreClient, CoreGenderClaim, CoreIdToken, CoreIdTokenClaims, CoreJsonWebKey,
-        CoreJsonWebKeyType, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
-        CoreTokenIntrospectionResponse, CoreTokenType, CoreUserInfoClaims,
-    },
-    AccessToken, AccessTokenHash, AdditionalClaims, AuthorizationCode, EmptyAdditionalClaims,
-    EmptyExtraTokenFields, ExtraTokenFields, GenderClaim, IdToken, IdTokenClaims, Nonce,
-    OAuth2TokenResponse, PkceCodeVerifier, StandardClaims, StandardTokenIntrospectionResponse,
-    TokenIntrospectionResponse, UserInfoClaims,
+    connect, create_client, get_bearer_token, validate_token, Client, RealmRole,
 };
 use openidconnect::{reqwest::async_http_client, TokenResponse};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use openidconnect::{
+    AccessTokenHash, AuthorizationCode, Nonce, OAuth2TokenResponse, PkceCodeVerifier,
+    TokenIntrospectionResponse,
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuth2Params {
@@ -38,105 +20,93 @@ pub struct OAuth2Params {
     pub iss: String,
 }
 
-#[get("/home")]
-async fn home(data: Data<AppData>, req: HttpRequest) -> impl Responder {
-    let pkce_verifier = data.pkce_verifier.clone();
-    let pkce_verifier = pkce_verifier.lock().unwrap();
-
-    let nonce = data.nonce.clone();
-    let nonce = nonce.lock().unwrap();
-
-    let bearer_token = req
-        .headers()
-        .get("Authorization")
-        .map(|value| {
-            value
-                .as_bytes()
-                .split(|&byte| byte == b' ')
-                .nth(1)
-                .map(|token| String::from_utf8(token.to_vec()).unwrap())
-        })
-        .unwrap()
-        .unwrap();
-
-    // get the access token
-    /*     let access_token: IdToken<
-           CustomClaims
-           CoreGenderClaim,
-           CoreJweContentEncryptionAlgorithm,
-           CoreJwsSigningAlgorithm,
-           CoreJsonWebKeyType,
-       > = IdToken::from_str(&bearer_token).unwrap();
-       let claims = access_token
-           .claims(
-               &data.openapi_client.id_token_verifier(),
-               &Nonce::new(nonce.as_ref().unwrap().to_string()),
-           )
-           .unwrap();
-    */
-    HttpResponse::Ok()
-}
-
 #[get("/read")]
 async fn read(data: Data<AppData>, req: HttpRequest) -> impl Responder {
-    let bearer_token = req
-        .headers()
-        .get("Authorization")
-        .map(|value| {
-            value
-                .as_bytes()
-                .split(|&byte| byte == b' ')
-                .nth(1)
-                .map(|token| String::from_utf8(token.to_vec()).unwrap())
-        })
-        .unwrap()
-        .unwrap();
+    if let Ok(bearer_token) = get_bearer_token(&req) {
+        if let Ok(intro_response) = validate_token(&data.openapi_client, bearer_token).await {
+            if intro_response.active() {
+                let expected_role: String = RealmRole::RealmReadRole.into();
+                let ef = intro_response.extra_fields();
 
-    // get the access token
-    let access_token = AccessToken::new(bearer_token);
-    let intro_request = data.openapi_client.introspect(&access_token).unwrap();
-    let intro_response: RealmTokenIntrospectionResponse = intro_request
-        .request_async(async_http_client)
-        .await
-        .unwrap();
-    let ef = intro_response.extra_fields();
-    println!("Extra fields: {:?}", ef);
-    HttpResponse::Ok().json(intro_response)
+                if ef
+                    .realm_access
+                    .clone()
+                    .unwrap()
+                    .roles
+                    .contains(&expected_role)
+                {
+                    return HttpResponse::Ok().json(intro_response);
+                }
+            } else {
+                return HttpResponse::Unauthorized().finish();
+            }
+        }
+    }
+
+    HttpResponse::InternalServerError().finish()
+}
+
+#[post("/write")]
+async fn write(data: Data<AppData>, req: HttpRequest) -> impl Responder {
+    println!("Write");
+    if let Ok(bearer_token) = get_bearer_token(&req) {
+        if let Ok(intro_response) = validate_token(&data.openapi_client, bearer_token).await {
+            if intro_response.active() {
+                let expected_role: String = RealmRole::RealmWriteRole.into();
+                let ef = intro_response.extra_fields();
+
+                if ef
+                    .realm_access
+                    .clone()
+                    .unwrap()
+                    .roles
+                    .contains(&expected_role)
+                {
+                    return HttpResponse::Ok().json(intro_response);
+                }
+            } else {
+                return HttpResponse::Unauthorized().finish();
+            }
+        }
+    }
+
+    HttpResponse::InternalServerError().finish()
 }
 
 #[get("/")]
 async fn index(data: Data<AppData>, state: Option<web::Query<OAuth2Params>>) -> impl Responder {
-    println!("/");
+    println!("Index");
     if let Some(state) = state {
-        println!("State");
+        let (pkce_verifier, nonce) = {
+            let pkce_verifier = data.pkce_verifier.clone();
+            let pkce_verifier = pkce_verifier.lock().unwrap();
 
-        let pkce_verifier = data.pkce_verifier.clone();
-        let pkce_verifier = pkce_verifier.lock().unwrap();
+            let nonce = data.nonce.clone();
+            let nonce = nonce.lock().unwrap();
 
-        let nonce = data.nonce.clone();
-        let nonce = nonce.lock().unwrap();
+            (pkce_verifier.clone(), nonce.clone())
+        };
 
         // Get the access and ID token
-        let token_response = data
+        let token_response = match data
             .openapi_client
             .exchange_code(AuthorizationCode::new(state.code.clone()))
             .set_pkce_verifier(PkceCodeVerifier::new(
-                pkce_verifier.as_ref().unwrap().to_string(),
+                pkce_verifier.unwrap_or_default().to_string(),
             ))
             .request_async(async_http_client)
             .await
-            .unwrap();
+        {
+            Ok(resp) => resp,
+            Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        };
+
         let token = token_response.id_token().unwrap();
-        /*         let id_token = IdToken::from_str(&token.to_string()).unwrap();
-               let claims: IdTokenClaims<CustomClaims, CoreGenderClaim> =
-                   id_token.claims(verifier, nonce_verifier).unwrap();
-        */
-        println!("access_token: {:#?} ", token_response.access_token());
 
         let claims = token
             .claims(
                 &data.openapi_client.id_token_verifier(),
-                &Nonce::new(nonce.as_ref().unwrap().to_string()),
+                &Nonce::new(nonce.unwrap_or_default()),
             )
             .unwrap();
 
@@ -164,7 +134,6 @@ async fn index(data: Data<AppData>, state: Option<web::Query<OAuth2Params>>) -> 
                 .unwrap_or("<not provided>"),
         );
 
-        println!("Claims: {:?}", claims);
         HttpResponse::Ok().body(token.to_string())
     } else {
         // Need to login
@@ -176,7 +145,7 @@ async fn index(data: Data<AppData>, state: Option<web::Query<OAuth2Params>>) -> 
 
         let mut data_nonce = data.nonce.lock().unwrap();
         *data_nonce = Some(nonce.secret().to_string());
-        println!("Redirect to {}", auth_url.to_string());
+
         HttpResponse::TemporaryRedirect()
             .append_header(("Location", auth_url.to_string()))
             .finish()
@@ -184,13 +153,28 @@ async fn index(data: Data<AppData>, state: Option<web::Query<OAuth2Params>>) -> 
 }
 
 #[get("/logout")]
-async fn logout() -> impl Responder {
-    HttpResponse::Ok().body("Logout")
-}
+async fn logout(data: Data<AppData>, req: HttpRequest) -> impl Responder {
+    println!("Logout");
+    if let Ok(bearer_token) = get_bearer_token(&req) {
+        if let Ok(intro_response) = validate_token(&data.openapi_client, bearer_token).await {
+            if intro_response.active() {
+                let expected_role: String = RealmRole::RealmWriteRole.into();
+                let ef = intro_response.extra_fields();
 
-#[post("/write")]
-async fn write(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
+                if ef
+                    .realm_access
+                    .clone()
+                    .unwrap()
+                    .roles
+                    .contains(&expected_role)
+                {
+                    return HttpResponse::Ok().json(intro_response);
+                }
+            }
+            return HttpResponse::Ok().body("Logout");
+        }
+    }
+    HttpResponse::InternalServerError().finish()
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +195,6 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(Data::new(app_data.clone()))
-            .service(home)
             .service(index)
             .service(logout)
             .service(write)

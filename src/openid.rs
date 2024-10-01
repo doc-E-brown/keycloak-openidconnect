@@ -1,21 +1,48 @@
+use actix_web::HttpRequest;
 use openidconnect::{
     core::{
-        CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreClient, CoreErrorResponseType,
-        CoreGenderClaim, CoreIdTokenClaims, CoreJsonWebKey, CoreJsonWebKeyType, CoreJsonWebKeyUse,
+        CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
+        CoreGenderClaim, CoreJsonWebKey, CoreJsonWebKeyType, CoreJsonWebKeyUse,
         CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm, CoreProviderMetadata,
-        CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse,
-        CoreTokenResponse, CoreTokenType,
+        CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenResponse, CoreTokenType,
     },
     reqwest::async_http_client,
     url::Url,
-    AdditionalClaims, ClientId, ClientSecret, CodeTokenRequest, CsrfToken, EmptyExtraTokenFields,
-    ExtraTokenFields, HttpResponse, IdTokenClaims, IdTokenFields, IntrospectionRequest,
-    IntrospectionUrl, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
-    StandardErrorResponse, StandardTokenIntrospectionResponse, StandardTokenResponse,
+    AccessToken, ClientId, ClientSecret, CsrfToken, EmptyAdditionalClaims, ExtraTokenFields,
+    IntrospectionRequest, IntrospectionUrl, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
+    RedirectUrl, RevocationUrl, Scope, StandardErrorResponse, StandardTokenIntrospectionResponse,
 };
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RealmRole {
+    RealmReadRole,
+    RealmWriteRole,
+}
+
+impl From<RealmRole> for String {
+    fn from(value: RealmRole) -> Self {
+        match value {
+            RealmRole::RealmReadRole => "Realm-Read-Role".to_string(),
+            RealmRole::RealmWriteRole => "Realm-Write-Role".to_string(),
+        }
+    }
+}
+
+impl TryFrom<String> for RealmRole {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        match value.to_lowercase().as_str() {
+            "realm-read-role" => Ok(RealmRole::RealmReadRole),
+            "realm-write-role" => Ok(RealmRole::RealmWriteRole),
+            _ => Err(anyhow::anyhow!("Invalid realm role")),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,51 +55,19 @@ pub struct RealmAccessClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub realm_access: Option<RealmAccess>,
 }
-
-impl AdditionalClaims for RealmAccess {}
-impl AdditionalClaims for RealmAccessClaims {}
 impl ExtraTokenFields for RealmAccessClaims {}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CustomClaims {
-    #[serde(flatten)]
-    standard_claims: CoreIdTokenClaims,
-    #[serde(flatten)]
-    additional_claims: RealmAccessClaims,
-}
-
-impl AdditionalClaims for CustomClaims {}
-
-pub type RealmAccessIdTokenFields = IdTokenFields<
-    RealmAccessClaims,
-    EmptyExtraTokenFields,
-    CoreGenderClaim,
-    CoreJweContentEncryptionAlgorithm,
-    CoreJwsSigningAlgorithm,
-    CoreJsonWebKeyType,
->;
-
-pub type RealmAccessIdTokenClaims = IdTokenClaims<RealmAccessClaims, CoreGenderClaim>;
-
-pub type RealmTokenResponse = StandardTokenResponse<RealmAccessIdTokenFields, CoreTokenType>;
-pub type RealmCodeTokenRequest<'a> = CodeTokenRequest<
-    'a,
-    StandardErrorResponse<CoreErrorResponseType>,
-    RealmTokenResponse,
-    CoreTokenType,
->;
 
 pub type RealmIntrospectionRequest<'a> = IntrospectionRequest<
     'a,
     StandardErrorResponse<CoreErrorResponseType>,
-    RealmTokenResponse,
+    RealmTokenIntrospectionResponse,
     CoreTokenType,
 >;
 pub type RealmTokenIntrospectionResponse =
     StandardTokenIntrospectionResponse<RealmAccessClaims, CoreTokenType>;
 
 pub type Client = openidconnect::Client<
-    RealmAccessClaims,
+    EmptyAdditionalClaims,
     CoreAuthDisplay,
     CoreGenderClaim,
     CoreJweContentEncryptionAlgorithm,
@@ -82,7 +77,7 @@ pub type Client = openidconnect::Client<
     CoreJsonWebKey,
     CoreAuthPrompt,
     StandardErrorResponse<CoreErrorResponseType>,
-    RealmTokenResponse,
+    CoreTokenResponse,
     CoreTokenType,
     RealmTokenIntrospectionResponse,
     CoreRevocableToken,
@@ -109,6 +104,9 @@ pub async fn create_client() -> Result<Client> {
     )
     // Set the URL the user will be redirected to after the authorization process.
     .set_redirect_uri(RedirectUrl::new("http://localhost:8080/".to_string())?)
+    .set_revocation_uri(RevocationUrl::new(
+        "http://localhost:5100/realms/auth-test/protocol/openid-connect/revoke".to_string(),
+    )?)
     .set_introspection_uri(IntrospectionUrl::new(
         "http://localhost:5100/realms/auth-test/protocol/openid-connect/token/introspect"
             .to_string(),
@@ -136,4 +134,43 @@ pub async fn connect(client: &Client) -> Result<(Url, CsrfToken, PkceCodeVerifie
         .url();
 
     Ok((auth_url, csrf_token, pkce_verifier, nonce))
+}
+
+pub async fn validate_token(
+    client: &Client,
+    bearer_token: String,
+) -> Result<RealmTokenIntrospectionResponse> {
+    let access_token = AccessToken::new(bearer_token);
+    let intro_request = client.introspect(&access_token).unwrap();
+    let intro_response: RealmTokenIntrospectionResponse =
+        intro_request.request_async(async_http_client).await?;
+
+    Ok(intro_response)
+}
+
+pub fn get_bearer_token(req: &HttpRequest) -> Result<String> {
+    req.headers()
+        .get("Authorization")
+        .map(|value| {
+            value
+                .as_bytes()
+                .split(|&byte| byte == b' ')
+                .nth(1)
+                .map(|token| String::from_utf8(token.to_vec()).unwrap())
+        })
+        .ok_or(anyhow::anyhow!("Authorization header not found"))?
+        .ok_or(anyhow::anyhow!("Bearer token not found"))
+}
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_realm_roles() {
+        let role: String = RealmRole::RealmReadRole.into();
+        assert_eq!(role, "Realm-Read-Role".to_string());
+
+        let role: RealmRole = RealmRole::try_from("Realm-Read-Role".to_string()).unwrap();
+        assert_eq!(role, RealmRole::RealmReadRole);
+    }
 }
