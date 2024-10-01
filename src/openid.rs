@@ -99,7 +99,7 @@ pub async fn create_client() -> Result<Client> {
         provider_metadata,
         ClientId::new("demo-client".to_string()),
         Some(ClientSecret::new(
-            "QGiQyQkQsYHTi5k4k98YIl5uFBpqknT4".to_string(),
+            "heSPt2rwhd3ektvFZWXYWLmUqbIXG3lw".to_string(),
         )),
     )
     // Set the URL the user will be redirected to after the authorization process.

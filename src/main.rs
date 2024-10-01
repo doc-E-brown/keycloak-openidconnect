@@ -20,6 +20,13 @@ pub struct OAuth2Params {
     pub iss: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tokens {
+    pub access_token: String,
+    pub id_token: String,
+    pub refresh_token: String,
+}
+
 #[get("/read")]
 async fn read(data: Data<AppData>, req: HttpRequest) -> impl Responder {
     if let Ok(bearer_token) = get_bearer_token(&req) {
@@ -134,7 +141,13 @@ async fn index(data: Data<AppData>, state: Option<web::Query<OAuth2Params>>) -> 
                 .unwrap_or("<not provided>"),
         );
 
-        HttpResponse::Ok().body(token.to_string())
+        let tokens = Tokens {
+            access_token: token_response.access_token().secret().to_string(),
+            id_token: token.to_string(),
+            refresh_token: token_response.refresh_token().unwrap().secret().to_string(),
+        };
+
+        HttpResponse::Ok().json(tokens)
     } else {
         // Need to login
         println!("Need to redirect");
@@ -150,31 +163,6 @@ async fn index(data: Data<AppData>, state: Option<web::Query<OAuth2Params>>) -> 
             .append_header(("Location", auth_url.to_string()))
             .finish()
     }
-}
-
-#[get("/logout")]
-async fn logout(data: Data<AppData>, req: HttpRequest) -> impl Responder {
-    println!("Logout");
-    if let Ok(bearer_token) = get_bearer_token(&req) {
-        if let Ok(intro_response) = validate_token(&data.openapi_client, bearer_token).await {
-            if intro_response.active() {
-                let expected_role: String = RealmRole::RealmWriteRole.into();
-                let ef = intro_response.extra_fields();
-
-                if ef
-                    .realm_access
-                    .clone()
-                    .unwrap()
-                    .roles
-                    .contains(&expected_role)
-                {
-                    return HttpResponse::Ok().json(intro_response);
-                }
-            }
-            return HttpResponse::Ok().body("Logout");
-        }
-    }
-    HttpResponse::InternalServerError().finish()
 }
 
 #[derive(Debug, Clone)]
@@ -196,7 +184,6 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(Data::new(app_data.clone()))
             .service(index)
-            .service(logout)
             .service(write)
             .service(read)
     })

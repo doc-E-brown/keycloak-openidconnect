@@ -1,13 +1,29 @@
 ---
 services:
-
+  
+  postgres:
+    build:
+      context: .
+      dockerfile: postgres.Dockerfile
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres 
+      POSTGRES_PASSWORD: postgres 
+      POSTGRES_DB: postgres 
+    restart: always
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+  
   key-cloak:
+      depends_on:
+        - postgres
       profiles: ["non-started"]
       build:
+        dockerfile: keycloak.Dockerfile
         context: '.'
         args:
-            KEYCLOAK_CERT: ${KEYCLOAK_CERT}
-            KEYCLOAK_CERT_KEY: ${KEYCLOAK_CERT_KEY}
             KEYCLOAK_ADMIN: admin
             KEYCLOAK_ADMIN_PASSWORD: admin
       entrypoint: "/opt/keycloak/bin/kc.sh"
@@ -16,11 +32,16 @@ services:
         - "5101:5101" # Https port
       working_dir: '/app'
       environment:
-        # KC_DB: mariadb
-        # KC_DB_SCHEMA: keycloak
-        # KC_DB_USERNAME: keycloak
-        # KC_DB_PASSWORD: ${MARIADB_KEYCLOAK_PASSWORD:-keycloak}
-        # KC_DB_URL_HOST: mariadb
+        KEYCLOAK_USER: admin
+        KEYCLOAK_PASSWORD: password
+        DB_VENDOR: postgres
+        DB_ADDR: postgres 
+        DB_PORT: 5432
+        DB_SCHEMA: keycloak_schema
+        DB_DATABASE: postgres
+        DB_USER: keycloak_user
+        DB_PASSWORD: password
+
         KEYCLOAK_ADMIN: admin
         KEYCLOAK_ADMIN_PASSWORD: admin
         KC_PROXY: edge
@@ -35,6 +56,7 @@ services:
         "--https-certificate-file=/opt/keycloak/certs/tls.crt.pem",
         "--https-certificate-key-file=/opt/keycloak/certs/tls.key.pem",
         "--import-realm", # Tells it to import our config file on start up
+        "--verbose"
         #"--log-level=debug", # enables debugging
         ]
       volumes:
